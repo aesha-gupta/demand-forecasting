@@ -1,0 +1,9 @@
+pandas
+numpy
+matplotlib
+plotly
+scikit-learn
+prophet
+xgboost
+streamlit
+joblib

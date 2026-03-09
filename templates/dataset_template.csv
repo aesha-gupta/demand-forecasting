@@ -1,0 +1,6 @@
+date,product_id,price,sales_qty,store_id,is_promotion,holiday_flag
+2023-01-01,PROD_A,12.50,100,STORE_1,0,0
+2023-01-02,PROD_A,12.50,120,STORE_1,1,0
+2023-01-03,PROD_A,13.00,95,STORE_1,0,0
+2023-01-01,PROD_B,8.99,200,STORE_1,0,0
+2023-01-02,PROD_B,8.99,185,STORE_1,0,0
