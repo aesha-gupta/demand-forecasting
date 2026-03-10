@@ -71,6 +71,15 @@ def fill_missing_dates(df: pd.DataFrame) -> pd.DataFrame:
         group["sales_qty"] = group["sales_qty"].fillna(method="ffill", limit=2)
         group["sales_qty"] = group["sales_qty"].fillna(median_sales)
 
+        # Fill optional flag/numeric columns so Prophet/XGBoost never see NaN
+        # holiday_flag and is_promotion default to 0 (no event on imputed days)
+        for flag_col in ["holiday_flag", "is_promotion"]:
+            if flag_col in group.columns:
+                group[flag_col] = group[flag_col].fillna(0).astype(int)
+        # price: forward-fill then backward-fill to carry the nearest known price
+        if "price" in group.columns:
+            group["price"] = group["price"].fillna(method="ffill").fillna(method="bfill")
+
         return group.reset_index()
 
     if not group_cols:
