@@ -48,23 +48,14 @@ def validate_dataset(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
 
     # Step 3 — parse dates
-    # Try explicit formats in order: dd-mm-yyyy, yyyy-mm-dd, then dayfirst inference
-    _FORMATS = ["%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"]
-    parsed = None
-    for fmt in _FORMATS:
-        try:
-            parsed = pd.to_datetime(df["date"], format=fmt)
-            break
-        except (ValueError, TypeError):
-            continue
-    if parsed is None:
-        try:
-            parsed = pd.to_datetime(df["date"], dayfirst=True)
-        except Exception as exc:
-            raise ValueError(
-                f"Column 'date' could not be parsed as datetime: {exc}"
-            ) from exc
-    df["date"] = parsed
+    # format='mixed' + dayfirst=True handles dd/mm/yyyy, dd-mm-yyyy, yyyy-mm-dd, etc.
+    # dayfirst=True ensures "19/02/2010" is read as 19 Feb, not 2 Oct.
+    try:
+        df["date"] = pd.to_datetime(df["date"], format="mixed", dayfirst=True)
+    except Exception as exc:
+        raise ValueError(
+            f"Column 'date' could not be parsed as datetime: {exc}"
+        ) from exc
 
     # Step 4 — coerce sales_qty to numeric
     original_sales = df["sales_qty"].copy()
