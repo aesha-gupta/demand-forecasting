@@ -33,6 +33,27 @@ def _get_group_cols(df: pd.DataFrame) -> list:
     return cols
 
 
+def _detect_freq(df: pd.DataFrame) -> str:
+    """Return 'W' for weekly data, 'D' for daily (based on median date gap)."""
+    cols = _get_group_cols(df)
+    if cols:
+        totals = df.groupby(cols)["sales_qty"].sum()
+        best = totals.idxmax()
+        if isinstance(best, tuple):
+            mask = pd.Series(True, index=df.index)
+            for c, v in zip(cols, best):
+                mask &= df[c] == v
+            sample = df[mask]
+        else:
+            sample = df[df[cols[0]] == best]
+    else:
+        sample = df
+    diffs = sample.sort_values("date")["date"].diff().dropna()
+    if diffs.empty:
+        return "D"
+    return "W" if diffs.dt.days.median() >= 5 else "D"
+
+
 def create_time_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add calendar-based time features derived from the *date* column.
 
@@ -93,12 +114,16 @@ def create_lag_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy().sort_values("date").reset_index(drop=True)
     group_cols = _get_group_cols(df)
 
-    for lag in [7, 14, 28]:
-        col = f"sales_lag_{lag}"
+    freq = _detect_freq(df)
+    # For weekly data: 1 row = 1 week, so shift by 1/2/4 rows for lag_7/14/28
+    # For daily data: shift by 7/14/28 rows directly
+    lag_periods = {7: 1, 14: 2, 28: 4} if freq == "W" else {7: 7, 14: 14, 28: 28}
+    for days, periods in lag_periods.items():
+        col = f"sales_lag_{days}"
         if group_cols:
-            df[col] = df.groupby(group_cols)["sales_qty"].shift(lag)
+            df[col] = df.groupby(group_cols)["sales_qty"].shift(periods)
         else:
-            df[col] = df["sales_qty"].shift(lag)
+            df[col] = df["sales_qty"].shift(periods)
 
     return df
 
@@ -128,11 +153,15 @@ def create_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy().sort_values("date").reset_index(drop=True)
     group_cols = _get_group_cols(df)
 
+    freq = _detect_freq(df)
+    # Window sizes in rows: 4wk/13wk for weekly (~1mo/3mo), 7d/28d for daily
+    w_short, w_long = (4, 13) if freq == "W" else (7, 28)
+
     def _rolling_stats(series: pd.Series) -> pd.DataFrame:
         shifted = series.shift(1)
-        mean_7 = shifted.rolling(window=7, min_periods=1).mean()
-        mean_28 = shifted.rolling(window=28, min_periods=1).mean()
-        std_7 = shifted.rolling(window=7, min_periods=1).std()
+        mean_7 = shifted.rolling(window=w_short, min_periods=1).mean()
+        mean_28 = shifted.rolling(window=w_long, min_periods=1).mean()
+        std_7 = shifted.rolling(window=w_short, min_periods=1).std()
         return pd.DataFrame(
             {
                 "rolling_mean_7": mean_7,

@@ -34,8 +34,45 @@ def _get_group_cols(df: pd.DataFrame) -> list:
     return cols
 
 
+def detect_frequency(df: pd.DataFrame) -> str:
+    """Detect the dominant time step of the dataset.
+
+    Examines the median gap between consecutive dates in the highest-volume
+    series and returns ``'W'`` when the gap is ≥ 5 days (weekly data) or
+    ``'D'`` for daily data.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Validated DataFrame containing a *date* column.
+
+    Returns
+    -------
+    str
+        ``'D'`` (daily) or ``'W'`` (weekly).
+    """
+    group_cols = _get_group_cols(df)
+    if group_cols:
+        totals = df.groupby(group_cols)["sales_qty"].sum()
+        best_key = totals.idxmax()
+        if isinstance(best_key, tuple):
+            mask = pd.Series(True, index=df.index)
+            for col, val in zip(group_cols, best_key):
+                mask &= df[col] == val
+            sample = df[mask]
+        else:
+            sample = df[df[group_cols[0]] == best_key]
+    else:
+        sample = df
+
+    diffs = sample.sort_values("date")["date"].diff().dropna()
+    if diffs.empty:
+        return "D"
+    return "W" if diffs.dt.days.median() >= 5 else "D"
+
+
 def fill_missing_dates(df: pd.DataFrame) -> pd.DataFrame:
-    """Reindex each group to a continuous daily date range and impute missing sales.
+    """Reindex each group to a continuous date range and impute missing sales.
 
     For every group (determined by product_id / store_id presence):
     * A complete date range is created from the group's min to max date.
@@ -56,29 +93,37 @@ def fill_missing_dates(df: pd.DataFrame) -> pd.DataFrame:
         *is_imputed* flag column.
     """
     group_cols = _get_group_cols(df)
+    freq = detect_frequency(df)
 
     def _fill_group(group: pd.DataFrame) -> pd.DataFrame:
         group = group.set_index("date").sort_index()
-        full_range = pd.date_range(group.index.min(), group.index.max(), freq="D")
+        if freq == "W":
+            # Preserve original weekday cadence (e.g. Fridays for Walmart)
+            start, end = group.index.min(), group.index.max()
+            n = max(1, int(round((end - start).days / 7)) + 1)
+            full_range = pd.date_range(start=start, periods=n, freq="7D")
+        else:
+            full_range = pd.date_range(
+                group.index.min(), group.index.max(), freq="D"
+            )
         group = group.reindex(full_range)
         group.index.name = "date"
 
         # Track which rows were synthetically created
         group["is_imputed"] = group["sales_qty"].isna()
 
-        # Forward fill up to 2 days, then fill remainder with median
+        # Forward fill (1 period for weekly, 2 days for daily), then median
+        ffill_limit = 1 if freq == "W" else 2
         median_sales = group["sales_qty"].median()
-        group["sales_qty"] = group["sales_qty"].fillna(method="ffill", limit=2)
+        group["sales_qty"] = group["sales_qty"].ffill(limit=ffill_limit)
         group["sales_qty"] = group["sales_qty"].fillna(median_sales)
 
         # Fill optional flag/numeric columns so Prophet/XGBoost never see NaN
-        # holiday_flag and is_promotion default to 0 (no event on imputed days)
         for flag_col in ["holiday_flag", "is_promotion"]:
             if flag_col in group.columns:
                 group[flag_col] = group[flag_col].fillna(0).astype(int)
-        # price: forward-fill then backward-fill to carry the nearest known price
         if "price" in group.columns:
-            group["price"] = group["price"].fillna(method="ffill").fillna(method="bfill")
+            group["price"] = group["price"].ffill().bfill()
 
         return group.reset_index()
 
@@ -98,7 +143,8 @@ def fill_missing_dates(df: pd.DataFrame) -> pd.DataFrame:
             parts.append(grp_filled)
         filled = pd.concat(parts, ignore_index=True)
 
-    filled = filled.sort_values("date").reset_index(drop=True)
+    sort_cols = [c for c in ["store_id", "product_id", "date"] if c in filled.columns]
+    filled = filled.sort_values(sort_cols).reset_index(drop=True)
     return filled
 
 
@@ -160,6 +206,9 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame
         Cleaned DataFrame ready for feature engineering.
     """
+    freq = detect_frequency(df)
     df = fill_missing_dates(df)
-    df = remove_closed_store_days(df)
+    # Store-closure removal is only meaningful for daily data
+    if freq == "D":
+        df = remove_closed_store_days(df)
     return df

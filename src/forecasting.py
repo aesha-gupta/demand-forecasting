@@ -22,6 +22,35 @@ SPLIT_DAYS = 42  # test-set size for time-based evaluation
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _detect_freq(df: pd.DataFrame) -> str:
+    """Return 'W' for weekly data, 'D' for daily (based on median date gap)."""
+    group_cols = []
+    if "product_id" in df.columns and "store_id" in df.columns:
+        group_cols = ["product_id", "store_id"]
+    elif "product_id" in df.columns:
+        group_cols = ["product_id"]
+    elif "store_id" in df.columns:
+        group_cols = ["store_id"]
+
+    if group_cols:
+        totals = df.groupby(group_cols)["sales_qty"].sum()
+        best = totals.idxmax()
+        if isinstance(best, tuple):
+            mask = pd.Series(True, index=df.index)
+            for c, v in zip(group_cols, best):
+                mask &= df[c] == v
+            sample = df[mask]
+        else:
+            sample = df[df[group_cols[0]] == best]
+    else:
+        sample = df
+
+    diffs = sample.sort_values("date")["date"].diff().dropna()
+    if diffs.empty:
+        return "D"
+    return "W" if diffs.dt.days.median() >= 5 else "D"
+
+
 def _get_representative_series(df: pd.DataFrame) -> pd.DataFrame:
     """Return the single time-series with the highest total sales volume.
 
@@ -168,7 +197,7 @@ def train_prophet(df: pd.DataFrame) -> tuple:
         yearly_seasonality=True,
         weekly_seasonality=True,
         daily_seasonality=False,
-        seasonality_mode="multiplicative",
+        seasonality_mode="additive",
         changepoint_prior_scale=0.05,
     )
 
@@ -356,8 +385,12 @@ def _forecast_prophet(model: Prophet, df: pd.DataFrame, horizon: int) -> pd.Data
     pd.DataFrame
         Columns: *date*, *predicted_sales*, *lower_bound*, *upper_bound*.
     """
-    # Build future DataFrame
-    future = model.make_future_dataframe(periods=horizon, freq="D")
+    # Use weekly cadence when the source data is weekly
+    data_freq = _detect_freq(df)
+    if data_freq == "W":
+        future = model.make_future_dataframe(periods=max(1, horizon // 7), freq="7D")
+    else:
+        future = model.make_future_dataframe(periods=horizon, freq="D")
 
     # Populate regressors on future dates using the most recent known values
     for reg in model.extra_regressors:
@@ -367,7 +400,7 @@ def _forecast_prophet(model: Prophet, df: pd.DataFrame, horizon: int) -> pd.Data
                 columns={"date": "ds"}
             )
             future = future.merge(reg_series, on="ds", how="left")
-            future[reg] = future[reg].fillna(method="ffill").fillna(0)
+            future[reg] = future[reg].ffill().fillna(0)
 
     raw = model.predict(future)
     forecast_rows = raw.tail(horizon).copy()
@@ -411,24 +444,40 @@ def _forecast_xgboost(
     pd.DataFrame
         Columns: *date*, *predicted_sales*, *lower_bound*, *upper_bound*.
     """
-    # Work with the representative (most recent) portion of the data
-    df_sorted = df.sort_values("date").reset_index(drop=True)
-    last_date = df_sorted["date"].max()
+    # Use the representative (single-store) series so that the history buffer
+    # is a proper time series and lag_7 truly means "7 days ago".
+    series_df = _get_representative_series(df).sort_values("date").reset_index(drop=True)
+    last_date = series_df["date"].max()
+
+    # Detect frequency to set correct lag sizes, window sizes, and step cadence
+    data_freq = _detect_freq(df)
+    if data_freq == "W":
+        # 1 row = 1 week: lag_7=1row, lag_14=2rows, lag_28=4rows; windows 4/13
+        lag7, lag14, lag28 = 1, 2, 4
+        win_short, win_long = 4, 13
+        max_lag = 4
+        n_periods = max(1, horizon // 7)
+        future_dates = pd.date_range(
+            start=last_date + pd.Timedelta(days=7), periods=n_periods, freq="7D"
+        )
+    else:
+        lag7, lag14, lag28 = 7, 14, 28
+        win_short, win_long = 7, 28
+        max_lag = 28
+        n_periods = horizon
+        future_dates = pd.date_range(
+            start=last_date + pd.Timedelta(days=1), periods=n_periods, freq="D"
+        )
 
     # Build a rolling history of sales for lag computation
-    max_lag = 28
-    history = list(df_sorted["sales_qty"].tail(max_lag + horizon).values)
-
-    future_dates = pd.date_range(
-        start=last_date + pd.Timedelta(days=1), periods=horizon, freq="D"
-    )
+    history = list(series_df["sales_qty"].tail(max_lag + n_periods).values)
 
     # Retain the last row's optional features (price, promotion, holiday)
-    last_row = df_sorted.iloc[-1]
+    last_row = series_df.iloc[-1]
     optional_static = {
         col: last_row[col]
         for col in ["price", "is_promotion", "holiday_flag"]
-        if col in df_sorted.columns
+        if col in series_df.columns
     }
 
     predictions = []
@@ -443,18 +492,18 @@ def _forecast_xgboost(
         row["is_month_start"] = int(fdate.is_month_start)
         row["is_month_end"] = int(fdate.is_month_end)
 
-        # Lag features from rolling history
+        # Lag features from rolling history (row-counts match training shifts)
         offset = len(history)
-        row["sales_lag_7"] = history[offset - 7] if offset >= 7 else np.nan
-        row["sales_lag_14"] = history[offset - 14] if offset >= 14 else np.nan
-        row["sales_lag_28"] = history[offset - 28] if offset >= 28 else np.nan
+        row["sales_lag_7"] = history[offset - lag7] if offset >= lag7 else np.nan
+        row["sales_lag_14"] = history[offset - lag14] if offset >= lag14 else np.nan
+        row["sales_lag_28"] = history[offset - lag28] if offset >= lag28 else np.nan
 
-        # Rolling features (shifted by 1, so use history[:-1] relative to current)
-        win_7 = [history[j] for j in range(max(0, offset - 8), offset - 1)]
-        win_28 = [history[j] for j in range(max(0, offset - 29), offset - 1)]
-        row["rolling_mean_7"] = float(np.mean(win_7)) if win_7 else 0.0
-        row["rolling_mean_28"] = float(np.mean(win_28)) if win_28 else 0.0
-        row["rolling_std_7"] = float(np.std(win_7)) if len(win_7) > 1 else 0.0
+        # Rolling features (shifted by 1 period before window)
+        win_s = [history[j] for j in range(max(0, offset - win_short - 1), offset - 1)]
+        win_l = [history[j] for j in range(max(0, offset - win_long - 1), offset - 1)]
+        row["rolling_mean_7"] = float(np.mean(win_s)) if win_s else 0.0
+        row["rolling_mean_28"] = float(np.mean(win_l)) if win_l else 0.0
+        row["rolling_std_7"] = float(np.std(win_s)) if len(win_s) > 1 else 0.0
 
         # Optional static features
         for col, val in optional_static.items():
