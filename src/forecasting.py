@@ -92,7 +92,38 @@ def _get_representative_series(df: pd.DataFrame) -> pd.DataFrame:
     return df[mask].copy()
 
 
-def _time_split(df: pd.DataFrame) -> tuple:
+def get_representative_series(df: pd.DataFrame) -> tuple:
+    """Public wrapper: return the representative series and a human-readable label.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, str]
+        (filtered_df, label) where label describes which store/product was selected.
+    """
+    group_cols = []
+    if "product_id" in df.columns and "store_id" in df.columns:
+        group_cols = ["product_id", "store_id"]
+    elif "product_id" in df.columns:
+        group_cols = ["product_id"]
+    elif "store_id" in df.columns:
+        group_cols = ["store_id"]
+
+    if not group_cols:
+        return df.copy(), "All data"
+
+    totals = df.groupby(group_cols)["sales_qty"].sum()
+    best_key = totals.idxmax()
+
+    if isinstance(best_key, tuple):
+        mask = pd.Series([True] * len(df), index=df.index)
+        for col, val in zip(group_cols, best_key):
+            mask = mask & (df[col] == val)
+        label = " / ".join(f"{c}={v}" for c, v in zip(group_cols, best_key))
+    else:
+        mask = df[group_cols[0]] == best_key
+        label = f"{group_cols[0]}={best_key}"
+
+    return df[mask].copy(), label
     """Split a DataFrame into train/test using a time-based cut.
 
     The last ``SPLIT_DAYS`` rows (by date) form the test set; everything

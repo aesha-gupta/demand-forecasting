@@ -476,8 +476,13 @@ if st.session_state["forecast_ready"]:
             )
             show_ci = st.checkbox("Show confidence interval", value=True)
 
-        hist_agg = df_features.groupby("date")["sales_qty"].sum().reset_index()
-        hist_agg = hist_agg.sort_values("date")
+        hist_series, series_label = forecasting.get_representative_series(df_features)
+        hist_series = hist_series.sort_values("date")
+        hist_agg = hist_series[["date", "sales_qty"]].copy()
+        st.caption(
+            f"Forecast is for the highest-volume series: **{series_label}**. "
+            "Historical line below matches the same series."
+        )
         hist_recent = hist_agg.tail(history_window)
 
         fig_fc = go.Figure()
