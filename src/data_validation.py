@@ -48,12 +48,23 @@ def validate_dataset(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
 
     # Step 3 — parse dates
-    try:
-        df["date"] = pd.to_datetime(df["date"], infer_datetime_format=True)
-    except Exception as exc:
-        raise ValueError(
-            f"Column 'date' could not be parsed as datetime: {exc}"
-        ) from exc
+    # Try explicit formats in order: dd-mm-yyyy, yyyy-mm-dd, then dayfirst inference
+    _FORMATS = ["%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"]
+    parsed = None
+    for fmt in _FORMATS:
+        try:
+            parsed = pd.to_datetime(df["date"], format=fmt)
+            break
+        except (ValueError, TypeError):
+            continue
+    if parsed is None:
+        try:
+            parsed = pd.to_datetime(df["date"], dayfirst=True)
+        except Exception as exc:
+            raise ValueError(
+                f"Column 'date' could not be parsed as datetime: {exc}"
+            ) from exc
+    df["date"] = parsed
 
     # Step 4 — coerce sales_qty to numeric
     original_sales = df["sales_qty"].copy()
@@ -79,8 +90,14 @@ def validate_dataset(df: pd.DataFrame) -> pd.DataFrame:
             "Column 'sales_qty' contains negative values, which are not allowed."
         )
 
-    # Step 7 — sort by date
-    df = df.sort_values("date").reset_index(drop=True)
+    # Step 7 — sort by group columns then date (handles per-store sequential CSVs)
+    sort_cols = []
+    if "store_id" in df.columns:
+        sort_cols.append("store_id")
+    if "product_id" in df.columns:
+        sort_cols.append("product_id")
+    sort_cols.append("date")
+    df = df.sort_values(sort_cols).reset_index(drop=True)
 
     return df
 
