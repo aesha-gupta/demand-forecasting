@@ -124,6 +124,9 @@ def get_representative_series(df: pd.DataFrame) -> tuple:
         label = f"{group_cols[0]}={best_key}"
 
     return df[mask].copy(), label
+
+
+def _time_split(df: pd.DataFrame) -> tuple:
     """Split a DataFrame into train/test using a time-based cut.
 
     The last ``SPLIT_DAYS`` rows (by date) form the test set; everything
